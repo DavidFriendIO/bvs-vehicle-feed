@@ -1,0 +1,88 @@
+import { PoliteFetcher, stageList, stageDetail, stageBuild, withLock, listAll } from './crawl.js';
+
+const CRON_STAGE = {
+  '5 0 * * *': 'list',
+  '*/10 1-3 * * *': 'detail',
+  '30 4 * * *': 'build',
+};
+const STAGES = { list: stageList, detail: stageDetail, build: stageBuild };
+
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+
+export async function runStage(stage, env, deps = {}) {
+  const kv = env.BVS_FEED;
+  const now = deps.now || Date.now;
+  return withLock(kv, now, () => {
+    const fetcher = deps.fetcher || new PoliteFetcher({ now, sleep: deps.sleep });
+    return STAGES[stage]({ kv, env, now, fetcher, alertFetch: deps.alertFetch });
+  });
+}
+
+const json = (obj, status = 200) =>
+  new Response(JSON.stringify(obj, null, 2), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' } });
+const notFound = () => new Response('Not found', { status: 404 });
+
+async function status(kv) {
+  const get = async (k, d) => { const r = await kv.get(k); try { return r ? JSON.parse(r) : d; } catch { return d; } };
+  const records = [];
+  for (const k of await listAll(kv, 'v:')) { const r = await get(k, null); if (r) records.push(r); }
+  const feed = await kv.get('feed');
+  const queue = await get('queue', []);
+  const index = await get('index', null);
+  const log = await get('log', []);
+  return {
+    lastRun: await get('lastRun', {}),
+    indexCrawledAt: index?.crawledAt ?? null,
+    idsInIndex: index?.ids?.length ?? 0,
+    itemsInFeed: feed ? (feed.match(/<item>/g) || []).length : 0,
+    queueLength: queue.length,
+    excluded: records.filter((r) => r.status === 'excluded').map((r) => ({ id: r.id, reason: r.reason })),
+    errors: records.filter((r) => r.status === 'error').map((r) => ({ id: r.id, reason: r.reason })),
+    recentAlerts: log.flatMap((e) => e.alerts || []).slice(-10),
+    nights: log.length,
+  };
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const token = env.FEED_TOKEN;
+    if (!token) return notFound();
+    const parts = url.pathname.split('/').filter(Boolean);
+
+    if (request.method === 'GET' && parts.length === 2 && parts[0] === 'feed' && parts[1].endsWith('.xml')) {
+      if (!safeEqual(parts[1].slice(0, -4), token)) return notFound();
+      const xml = await env.BVS_FEED.get('feed');
+      if (!xml) return new Response('Feed not built yet', { status: 503 });
+      return new Response(xml, { headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=300' } });
+    }
+    if (request.method === 'GET' && parts.length === 2 && parts[0] === 'status' && safeEqual(parts[1], token)) {
+      return json(await status(env.BVS_FEED));
+    }
+    if (request.method === 'POST' && parts.length === 2 && parts[0] === 'run' && safeEqual(parts[1], token)) {
+      const stage = url.searchParams.get('stage');
+      if (!STAGES[stage]) return json({ error: 'stage must be list, detail or build' }, 400);
+      const job = runStage(stage, env);
+      if (url.searchParams.get('wait') === '1') return json(await job);
+      ctx.waitUntil(job.catch((e) => console.error('manual run failed', e)));
+      return json({ started: stage, note: 'Running in the background; check /status/{token}' }, 202);
+    }
+    return notFound();
+  },
+
+  async scheduled(event, env, ctx) {
+    const stage = CRON_STAGE[event.cron];
+    if (!stage) { console.error('unknown cron', event.cron); return; }
+    ctx.waitUntil(
+      runStage(stage, env).then(
+        (r) => console.log(JSON.stringify({ stage, ...r })),
+        (e) => console.error(`stage ${stage} failed`, e),
+      ),
+    );
+  },
+};
