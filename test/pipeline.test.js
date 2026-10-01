@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeKV, fakeClock, fakeSite, makeFetcher } from './helpers.js';
-import { stageList, stageDetail, stageBuild } from '../src/crawl.js';
+import { stageList, stageDetail, stageBuild, stageBackfill } from '../src/crawl.js';
 import worker, { runStage } from '../src/index.js';
 
 async function fullRun({ kv = new FakeKV(), clock = fakeClock(), site } = {}) {
@@ -185,7 +185,7 @@ test('HTTP routes', async () => {
   assert.equal((await get(`/feed/${env.FEED_TOKEN}`)).status, 404);
   const st = await (await get(`/status/${env.FEED_TOKEN}`)).json();
   assert.equal(st.itemsInFeed, 1);
-  assert.equal((await get(`/run/${env.FEED_TOKEN}?stage=build`)).status, 404, 'GET not allowed');
+  assert.equal((await get(`/run/${env.FEED_TOKEN}?stage=nope`)).status, 400, 'GET accepted');
   assert.equal((await get(`/run/${env.FEED_TOKEN}?stage=nope`, 'POST')).status, 400);
   await kv.delete('feed');
   const run = await (await get(`/run/${env.FEED_TOKEN}?stage=build&wait=1`, 'POST')).json();
@@ -199,4 +199,55 @@ test('stage lock blocks overlapping stages', async () => {
   await kv.put('lock', JSON.stringify({ until: clock.t + 60000, stage: 'x' }));
   const r = await runStage('build', { BVS_FEED: kv }, { now: clock.now });
   assert.match(r.skipped, /running/);
+});
+
+test('backfill: loops detail fetches until the queue is empty, then builds', async () => {
+  const clock = fakeClock();
+  const kv = new FakeKV();
+  const site = fakeSite({ clock });
+  const deps = { kv, now: clock.now, fetcher: makeFetcher(site, clock), env: {} };
+  await stageList(deps);
+  const msgs = [];
+  const r = await stageBackfill({ ...deps, onProgress: (m) => msgs.push(m), maxMs: 10 * 3600 * 1000 });
+  assert.equal(r.queueLeft, 0);
+  assert.equal(r.stopped, 'queue empty');
+  assert.equal(r.build.items, 72);
+  assert.equal((await kv.get('feed')).match(/<item>/g).length, 72);
+  const t = site.calls.map((c) => c.t);
+  for (let i = 1; i < t.length; i++) assert.ok(t[i] - t[i - 1] >= 20000);
+  assert.match(msgs.at(-1), /^done: 72 items/);
+});
+
+test('backfill: stops at the time limit, keeps the queue, still builds', async () => {
+  const clock = fakeClock();
+  const kv = new FakeKV();
+  const site = fakeSite({ clock });
+  const deps = { kv, now: clock.now, fetcher: makeFetcher(site, clock), env: {} };
+  await stageList(deps);
+  const r = await stageBackfill({ ...deps, maxMs: 12 * 60 * 1000 });
+  assert.equal(r.stopped, 'time limit');
+  assert.ok(r.queueLeft > 0 && r.queueLeft < 72);
+  assert.ok(r.attempted >= 30 && r.attempted <= 40, `attempted ${r.attempted}`);
+  assert.ok(r.build.ok);
+});
+
+test('backfill over HTTP streams progress (GET)', async () => {
+  const clock = fakeClock();
+  const kv = new FakeKV();
+  const site = fakeSite({ clock });
+  const env = { FEED_TOKEN: 'b'.repeat(32), BVS_FEED: kv };
+  let pending;
+  const ctx = { waitUntil: (p) => { pending = p; } };
+  // seed index/queue with the three real fixtures only
+  await kv.put('index', JSON.stringify({ ids: ['8116122', '8128860', '8270075'].map((id) => ({ id, url: `https://www.braintreevansales.co.uk/x-braintree-essex-${id}`, listPrice: 1 })) }));
+  await kv.put('queue', JSON.stringify(['8116122', '8128860', '8270075']));
+  const orig = globalThis.fetch;
+  globalThis.fetch = site.fetchFn;
+  try {
+    const res = await worker.fetch(new Request(`https://w.example/run/${env.FEED_TOKEN}?stage=backfill`), env, ctx);
+    const text = await res.text();
+    await pending;
+    assert.match(text, /backfill started/);
+    assert.match(text, /done: 3 items/);
+  } finally { globalThis.fetch = orig; }
 });

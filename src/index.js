@@ -1,11 +1,11 @@
-import { PoliteFetcher, stageList, stageDetail, stageBuild, withLock, listAll } from './crawl.js';
+import { PoliteFetcher, stageList, stageDetail, stageBuild, stageBackfill, BACKFILL_MS, withLock, listAll } from './crawl.js';
 
 const CRON_STAGE = {
   '5 0 * * *': 'list',
   '*/10 1-3 * * *': 'detail',
   '30 4 * * *': 'build',
 };
-const STAGES = { list: stageList, detail: stageDetail, build: stageBuild };
+const STAGES = { list: stageList, detail: stageDetail, build: stageBuild, backfill: stageBackfill };
 
 function safeEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
@@ -19,8 +19,8 @@ export async function runStage(stage, env, deps = {}) {
   const now = deps.now || Date.now;
   return withLock(kv, now, () => {
     const fetcher = deps.fetcher || new PoliteFetcher({ now, sleep: deps.sleep });
-    return STAGES[stage]({ kv, env, now, fetcher, alertFetch: deps.alertFetch });
-  });
+    return STAGES[stage]({ kv, env, now, fetcher, alertFetch: deps.alertFetch, onProgress: deps.onProgress, maxMs: deps.maxMs });
+  }, stage === 'backfill' ? BACKFILL_MS + 3 * 60 * 1000 : undefined);
 }
 
 const json = (obj, status = 200) =>
@@ -64,9 +64,25 @@ export default {
     if (request.method === 'GET' && parts.length === 2 && parts[0] === 'status' && safeEqual(parts[1], token)) {
       return json(await status(env.BVS_FEED));
     }
-    if (request.method === 'POST' && parts.length === 2 && parts[0] === 'run' && safeEqual(parts[1], token)) {
+    if ((request.method === 'GET' || request.method === 'POST') && parts.length === 2 && parts[0] === 'run' && safeEqual(parts[1], token)) {
       const stage = url.searchParams.get('stage');
-      if (!STAGES[stage]) return json({ error: 'stage must be list, detail or build' }, 400);
+      if (!STAGES[stage]) return json({ error: 'stage must be list, detail, build or backfill' }, 400);
+      if (stage === 'backfill') {
+        // Stream progress: keep the tab open until it says "done". Closing it stops the run
+        // (the queue is kept, so just open the URL again to carry on).
+        const { readable, writable } = new TransformStream();
+        const w = writable.getWriter();
+        const enc = new TextEncoder();
+        const say = (m) => w.write(enc.encode(`${new Date().toISOString().slice(11, 19)} ${m}\n`)).catch(() => {});
+        say('backfill started; keep this tab open (about 12 minutes max)');
+        ctx.waitUntil(
+          runStage('backfill', env, { onProgress: say })
+            .then((r) => say(r.skipped ? `skipped: ${r.skipped}` : `result: ${JSON.stringify(r)}`))
+            .catch((e) => say(`failed: ${e.message}`))
+            .finally(() => w.close().catch(() => {})),
+        );
+        return new Response(readable, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+      }
       const job = runStage(stage, env);
       if (url.searchParams.get('wait') === '1') return json(await job);
       ctx.waitUntil(job.catch((e) => console.error('manual run failed', e)));

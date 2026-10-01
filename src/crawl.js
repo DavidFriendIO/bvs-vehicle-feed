@@ -94,10 +94,10 @@ export async function sendAlert(env, fetchFn, subject, body) {
 // ------------------------------------------------------------ lock (KV, best effort)
 
 const LOCK_MS = 10 * 60 * 1000;
-export async function withLock(kv, now, fn) {
+export async function withLock(kv, now, fn, ttlMs = LOCK_MS) {
   const held = await jget(kv, 'lock', null);
   if (held && held.until > now()) return { skipped: `another stage is running (${held.stage})` };
-  await kv.put('lock', JSON.stringify({ until: now() + LOCK_MS, stage: 'running' }), { expirationTtl: 600 });
+  await kv.put('lock', JSON.stringify({ until: now() + ttlMs, stage: 'running' }), { expirationTtl: Math.max(60, Math.ceil(ttlMs / 1000)) });
   try { return await fn(); } finally { await kv.delete('lock'); }
 }
 
@@ -252,4 +252,30 @@ export async function stageBuild(deps) {
   await recordRun(kv, now(), 'build', summary, [], alerts);
   if (alerts.length) await sendAlert(deps.env || {}, deps.alertFetch || fetch, 'BVS feed: build alert', alerts.join('\n'));
   return { alerts, ...summary };
+}
+
+// ------------------------------------------------------------------ backfill
+
+export const BACKFILL_MS = 12 * 60 * 1000;
+
+/** Detail fetches in a loop until the queue is empty, a fetch is throttled, or ~12 minutes pass; then build. */
+export async function stageBackfill(deps) {
+  const { kv, now = Date.now, onProgress = () => {}, maxMs = BACKFILL_MS } = deps;
+  const started = now();
+  let runs = 0, attempted = 0, stopped = 'queue empty';
+  const left = async () => (await jget(kv, 'queue', [])).length;
+  while (await left()) {
+    if (now() - started >= maxMs) { stopped = 'time limit'; break; }
+    const r = await stageDetail(deps);
+    runs++;
+    attempted += r.attempted;
+    onProgress(`detail run ${runs}: ${r.attempted} fetched, ${await left()} left${r.ok ? '' : ` (${r.reason})`}`);
+    if (!r.ok) { stopped = r.reason; break; }
+    if (!r.attempted) { stopped = 'nothing fetched'; break; }
+  }
+  onProgress('building feed');
+  const build = await stageBuild(deps);
+  const queueLeft = await left();
+  onProgress(`done: ${build.ok ? build.items + ' items' : 'build kept old feed'}, ${queueLeft} still queued (${stopped})`);
+  return { ok: build.ok, detailRuns: runs, attempted, stopped, queueLeft, build };
 }

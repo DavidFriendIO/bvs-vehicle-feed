@@ -147,7 +147,7 @@ export function parseVehiclePage(html, id) {
     const price = pm ? Number(pm[1].replace(/,/g, '')) : null;
     let vat = 'shown';
     if (/\+\s*vat/i.test(priceText)) vat = 'plus';
-    else if (/no vat/i.test(priceText) || /no vat/i.test(variant) || /no vat/i.test(description)) vat = 'no';
+    else if ([priceText, titleName, variant, description].some((t) => /no\s*vat/i.test(t))) vat = 'no';
 
     const data = {
       id: String(id), make, model, variant, year, price, vat, priceText, mileage,

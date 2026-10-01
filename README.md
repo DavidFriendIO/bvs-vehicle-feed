@@ -8,7 +8,9 @@ Cloudflare Worker that crawls braintreevansales.co.uk nightly (politely: one req
 | `*/10 1-3 * * *` | `detail`: fetch up to 3 queued vehicle pages |
 | `30 4 * * *` | `build`: write the XML to KV |
 
-Routes: `GET /feed/{token}.xml`, `GET /status/{token}`, `POST /run/{token}?stage=list|detail|build` (add `&wait=1` to wait for the result). Everything else is 404.
+Routes: `GET /feed/{token}.xml`, `GET /status/{token}`, `GET` or `POST /run/{token}?stage=list|detail|build|backfill`. Everything else is 404.
+
+`list`, `detail` and `build` run in the background (add `&wait=1` to wait for the JSON result). `backfill` loops detail fetches (20 s apart) until the queue is empty or about 12 minutes pass, then builds, and streams progress to the page: keep the tab open until it says `done`. If you close it early, the run stops and the queue is kept; open the URL again to carry on.
 
 Needs the **Workers Paid** plan: the list and build stages make more than 50 KV operations and the parsers use more than the free plan's 10 ms CPU.
 
@@ -31,7 +33,7 @@ Cloudflare dashboard > Workers > bvs-vehicle-feed > Settings > Variables and Sec
 - Price text: first `.vehicle-price__amount` after `.vehicle-price__block--price`.
 - Year, colour, fuel, transmission, body type: `.dt-spec-list` items (`.dt-spec-list__label` / `.dt-spec-list__stat`): Year, Colour, Fuel Type, Transmission, Body Style.
 - Images: `a.rsImg` hrefs (main gallery, `large1`), falling back to `a.group4` (lightbox, `large2`), then `og:image`.
-- "No VAT" text: `#detail-description-modal` only. Other vehicles' links elsewhere on the page also say "NO VAT", so never search the whole page.
+- "No VAT" text: the main price, `.vehicle-title-block__title` h1 and h2, and `#detail-description-modal` only. Other vehicles' links elsewhere on the page also say "NO VAT", so never search the whole page.
 - Features: `.list-stat` items inside `#detail-key-features-modal`.
 
 A page that fails any required field (title, year, price block) is stored as `status: error`, never as a partial item, and is retried by the next list crawl.

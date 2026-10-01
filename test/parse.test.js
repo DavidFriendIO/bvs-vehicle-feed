@@ -61,3 +61,15 @@ test('list page: 12 cards with price and mileage, 6 pages', () => {
   assert.equal(vito.url, 'https://www.braintreevansales.co.uk/used-mercedes-benz-vito-braintree-essex-8270075');
   assert.ok(cards.every((c) => c.listPrice > 0 && c.listMileage >= 0));
 });
+
+test('VAT: "no vat" only in the heading/derivative line is detected; similar-vehicle links are not', () => {
+  const base = raw('7027496');
+  const h2 = base.replace(/(<div class="vehicle-title-block__title">\s*<h1>[^<]*<\/h1>\s*<h2>)([^<]*)/, '$1$2.NO VAT');
+  assert.notEqual(h2, base);
+  assert.equal(parseVehiclePage(h2, '7027496').data.vat, 'no');
+  const h1 = base.replace(/(<div class="vehicle-title-block__title">\s*<h1>)([^<]*)/, '$1$2 no Vat');
+  assert.equal(parseVehiclePage(h1, '7027496').data.vat, 'no');
+  const plus = h2.replace('&pound;239,950', '&pound;239,950+VAT');
+  assert.equal(parseVehiclePage(plus, '7027496').data.vat, 'plus');
+  assert.equal(parseVehiclePage(raw('7027496'), '7027496').data.vat, 'shown');
+});
