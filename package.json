@@ -1,0 +1,14 @@
+{
+  "name": "bvs-vehicle-feed",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "deploy": "wrangler deploy",
+    "unwrap-fixtures": "python3 tools/unwrap-fixtures.py"
+  },
+  "devDependencies": {
+    "wrangler": "^4.146.0"
+  }
+}
