@@ -2,15 +2,13 @@
 
 Cloudflare Worker that crawls braintreevansales.co.uk nightly (politely: one request at a time, 20 s apart) and publishes a Google Merchant Center vehicle ads XML feed at `/feed/{FEED_TOKEN}.xml`.
 
-| Cron (UTC) | Stage |
-|---|---|
-| `5 0 * * *` | `list`: crawl the stock list, queue new/changed/stale vehicles, drop sold ones |
-| `*/10 1-3 * * *` | `detail`: fetch up to 3 queued vehicle pages |
-| `30 4 * * *` | `build`: write the XML to KV |
+**The Worker only serves the feed.** braintreevansales.co.uk sits behind Cloudflare Bot Management and challenges Worker requests (403, `cf-mitigated: challenge`), so the crawl runs in GitHub Actions instead (`.github/workflows/crawl.yml`, `scripts/crawl.js`). It runs the same stages, 20 s apart: `list` (queue new/changed/stale vehicles, drop sold ones), `detail` (fetch queued pages, capped per run) and `build` (write the XML), and stores state and the feed in the Worker's `BVS_FEED` KV through the Cloudflare API. The Worker has no cron triggers.
 
-Routes: `GET /feed/{token}.xml`, `GET /status/{token}`, `GET` or `POST /run/{token}?stage=list|detail|build|backfill`. `GET /debug/{token}?url=<encoded url>[&redirect=manual][&ua=none]` does one fetch with the crawler's headers and returns status, final URL, response headers and the first 2,000 characters of the body (or the full error). Everything else is 404.
+GitHub setup: Settings > Secrets and variables > Actions > repository secrets `CF_ACCOUNT_ID`, `CF_API_TOKEN` (Workers KV Storage: Edit), `CF_KV_NAMESPACE_ID`, and optionally `RESEND_API_KEY`. Actions > crawl > Run workflow: `probe` checks that GitHub isn't challenged; `crawl` runs everything (set `max_detail` to 80 for the first fill). The schedule is `0 1 * * *` UTC. GitHub pauses schedules after 60 days without repo activity.
 
-`list`, `detail` and `build` run in the background (add `&wait=1` to wait for the JSON result). `backfill` loops detail fetches (20 s apart) until the queue is empty or about 12 minutes pass, then builds, and streams progress to the page: keep the tab open until it says `done`. If you close it early, the run stops and the queue is kept; open the URL again to carry on.
+Routes: `GET /feed/{token}.xml`, `GET /status/{token}` (includes lock state and skipped runs), `GET` or `POST /run/{token}?stage=list|detail|build|backfill` (waits and returns the JSON result; `&async=1` returns at once but background work is cut off about 30 s later; `&force=1` clears a stale lock first). Running `list`/`detail`/`backfill` on the Worker will hit the block; they remain for testing. `GET /debug/{token}?url=<encoded url>[&redirect=manual][&ua=none]` does one fetch with the crawler's headers and returns status, final URL, response headers and the first 2,000 characters of the body (or the full error). Everything else is 404.
+
+`backfill` loops detail fetches (20 s apart) until the queue is empty or about 12 minutes pass, then builds, and streams progress to the page: keep the tab open until it says `done`. If you close it early, the run stops and the queue is kept; open the URL again to carry on.
 
 Needs the **Workers Paid** plan: the list and build stages make more than 50 KV operations and the parsers use more than the free plan's 10 ms CPU.
 

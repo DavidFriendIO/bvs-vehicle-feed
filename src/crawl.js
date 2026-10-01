@@ -41,8 +41,12 @@ export class PoliteFetcher {
         const doFetch = this.fetchFn; // plain call, `this` is not the fetcher
         const res = await doFetch(url, fetchInit());
         entry.status = res.status;
+        const mitigated = res.headers?.get?.('cf-mitigated') || '';
         const text = res.ok ? await res.text() : '';
-        return { status: res.status, ok: res.ok, text };
+        // Cloudflare Bot Management: a challenge can come back as 403 (cf-mitigated) or as a 200 interstitial.
+        const blocked = Boolean(mitigated) || res.status === 403 || (res.ok && /<title>\s*Just a moment/i.test(text.slice(0, 4000)));
+        if (blocked) entry.blocked = mitigated || 'challenge';
+        return { status: res.status, ok: res.ok && !blocked, text, blocked, mitigated };
       } catch (e) {
         entry.status = 0;
         entry.error = describeError(e);
@@ -68,9 +72,10 @@ export function describeError(e) {
   const cause = e?.cause ? ` (cause: ${e.cause.name ? e.cause.name + ': ' : ''}${e.cause.message ?? e.cause})` : '';
   return `${name}: ${msg}${cause}`;
 }
-export const failure = (r) => (r.error ? `fetch threw ${r.error}` : `HTTP ${r.status}`);
+export const failure = (r) =>
+  r.error ? `fetch threw ${r.error}` : r.blocked ? `blocked by Cloudflare (HTTP ${r.status}${r.mitigated ? `, cf-mitigated: ${r.mitigated}` : ''})` : `HTTP ${r.status}`;
 
-const throttled = (r) => r.status === 429 || r.status >= 500 || r.status === 0;
+const throttled = (r) => r.blocked || r.status === 403 || r.status === 429 || r.status >= 500 || r.status === 0;
 
 // ------------------------------------------------------------------ logging
 
@@ -107,12 +112,28 @@ export async function sendAlert(env, fetchFn, subject, body) {
 
 // ------------------------------------------------------------ lock (KV, best effort)
 
-const LOCK_MS = 10 * 60 * 1000;
-export async function withLock(kv, now, fn, ttlMs = LOCK_MS) {
+export const LOCK_MS = 5 * 60 * 1000;
+
+/** Current lock, or null when free/expired. */
+export async function lockState(kv, now) {
   const held = await jget(kv, 'lock', null);
-  if (held && held.until > now()) return { skipped: `another stage is running (${held.stage})` };
-  await kv.put('lock', JSON.stringify({ until: now() + ttlMs, stage: 'running' }), { expirationTtl: Math.max(60, Math.ceil(ttlMs / 1000)) });
+  if (!held || held.until <= now()) return null;
+  return { stage: held.stage, startedAt: held.startedAt ?? null, until: new Date(held.until).toISOString(), secondsLeft: Math.round((held.until - now()) / 1000) };
+}
+
+export async function withLock(kv, now, fn, ttlMs = LOCK_MS, stage = 'stage') {
+  const held = await lockState(kv, now);
+  if (held) return { skipped: `another run holds the lock (${held.stage}, started ${held.startedAt}, expires in ${held.secondsLeft}s)`, lock: held };
+  const t = now();
+  await kv.put('lock', JSON.stringify({ stage, startedAt: new Date(t).toISOString(), until: t + ttlMs }), { expirationTtl: Math.max(60, Math.ceil(ttlMs / 1000)) });
   try { return await fn(); } finally { await kv.delete('lock'); }
+}
+
+/** A skipped run must still show up in /status. */
+export async function recordSkip(kv, now, stage, reason) {
+  const last = await jget(kv, 'lastRun', {});
+  last[stage] = { ...(last[stage] || {}), skippedAt: new Date(now()).toISOString(), skipped: reason };
+  await jput(kv, 'lastRun', last);
 }
 
 // ------------------------------------------------------------------ stage 1
@@ -274,22 +295,23 @@ export const BACKFILL_MS = 12 * 60 * 1000;
 
 /** Detail fetches in a loop until the queue is empty, a fetch is throttled, or ~12 minutes pass; then build. */
 export async function stageBackfill(deps) {
-  const { kv, now = Date.now, onProgress = () => {}, maxMs = BACKFILL_MS } = deps;
+  const { kv, now = Date.now, onProgress = () => {}, maxMs = BACKFILL_MS, maxDetail = Infinity } = deps;
   const started = now();
-  let runs = 0, attempted = 0, stopped = 'queue empty';
+  let runs = 0, attempted = 0, stopped = 'queue empty', detailOk = true;
   const left = async () => (await jget(kv, 'queue', [])).length;
   while (await left()) {
     if (now() - started >= maxMs) { stopped = 'time limit'; break; }
+    if (attempted >= maxDetail) { stopped = 'request cap'; break; }
     const r = await stageDetail(deps);
     runs++;
     attempted += r.attempted;
     onProgress(`detail run ${runs}: ${r.attempted} fetched, ${await left()} left${r.ok ? '' : ` (${r.reason})`}`);
-    if (!r.ok) { stopped = r.reason; break; }
+    if (!r.ok) { stopped = r.reason; detailOk = false; break; }
     if (!r.attempted) { stopped = 'nothing fetched'; break; }
   }
   onProgress('building feed');
   const build = await stageBuild(deps);
   const queueLeft = await left();
   onProgress(`done: ${build.ok ? build.items + ' items' : 'build kept old feed'}, ${queueLeft} still queued (${stopped})`);
-  return { ok: build.ok, detailRuns: runs, attempted, stopped, queueLeft, build };
+  return { ok: build.ok && detailOk, detailOk, detailRuns: runs, attempted, stopped, queueLeft, build };
 }

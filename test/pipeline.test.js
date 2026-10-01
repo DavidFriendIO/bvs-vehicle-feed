@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeKV, fakeClock, fakeSite, makeFetcher } from './helpers.js';
 import { stageList, stageDetail, stageBuild, stageBackfill } from '../src/crawl.js';
-import worker, { runStage, debugFetch } from '../src/index.js';
+import worker, { runStage } from '../src/index.js';
 
 async function fullRun({ kv = new FakeKV(), clock = fakeClock(), site } = {}) {
   site = site || fakeSite({ clock });
@@ -198,7 +198,7 @@ test('stage lock blocks overlapping stages', async () => {
   const clock = fakeClock();
   await kv.put('lock', JSON.stringify({ until: clock.t + 60000, stage: 'x' }));
   const r = await runStage('build', { BVS_FEED: kv }, { now: clock.now });
-  assert.match(r.skipped, /running/);
+  assert.match(r.skipped, /holds the lock \(x/);
 });
 
 test('backfill: loops detail fetches until the queue is empty, then builds', async () => {
@@ -308,4 +308,48 @@ test('/debug returns status, final URL, headers, first 2000 chars; or the full e
     assert.equal(bad.error.name, 'TypeError');
     assert.match(bad.error.summary, /TypeError: boom \(cause: dns|Error: dns\)/);
   } finally { globalThis.fetch = orig; }
+});
+
+test('skipped runs are recorded; /status shows lock state; force clears a stale lock', async () => {
+  const kv = new FakeKV();
+  const env = { FEED_TOKEN: 'd'.repeat(32), BVS_FEED: kv };
+  const ctx = { waitUntil() {} };
+  await kv.put('lock', JSON.stringify({ stage: 'list', startedAt: '2026-10-02T00:05:00.000Z', until: Date.now() + 120000 }));
+  const call = (p, m = 'GET') => worker.fetch(new Request('https://w.example' + p, { method: m }), env, ctx);
+  let st = await (await call(`/status/${env.FEED_TOKEN}`)).json();
+  assert.equal(st.lock.stage, 'list');
+  assert.ok(st.lock.secondsLeft > 100);
+  const skipped = await (await call(`/run/${env.FEED_TOKEN}?stage=build`, 'POST')).json();
+  assert.match(skipped.skipped, /holds the lock \(list/);
+  st = await (await call(`/status/${env.FEED_TOKEN}`)).json();
+  assert.match(st.lastRun.build.skipped, /holds the lock/);
+  assert.ok(st.lastRun.build.skippedAt);
+  const forced = await (await call(`/run/${env.FEED_TOKEN}?stage=build&force=1`, 'POST')).json();
+  assert.equal(forced.ok, true);
+  st = await (await call(`/status/${env.FEED_TOKEN}`)).json();
+  assert.equal(st.lock, null);
+  // expired lock is ignored
+  await kv.put('lock', JSON.stringify({ stage: 'list', until: Date.now() - 1000 }));
+  assert.equal((await (await call(`/status/${env.FEED_TOKEN}`)).json()).lock, null);
+});
+
+test('a lock left by a killed run is released by the TTL; a normal run always releases it', async () => {
+  const kv = new FakeKV();
+  const clock = fakeClock();
+  await runStage('build', { BVS_FEED: kv }, { now: clock.now });
+  assert.equal(await kv.get('lock'), null);
+  await assert.rejects(runStage('build', { BVS_FEED: { ...kv, get: kv.get.bind(kv), put: kv.put.bind(kv), delete: kv.delete.bind(kv), list: async () => { throw new Error('kv down'); } } }, { now: clock.now }));
+  assert.equal(await kv.get('lock'), null, 'finally block ran');
+});
+
+test('Cloudflare challenge is detected and stops the detail stage; list reports it', async () => {
+  const clock = fakeClock();
+  const kv = new FakeKV();
+  const blocked = async () => ({ ok: false, status: 403, headers: new Headers({ 'cf-mitigated': 'challenge' }), text: async () => 'Just a moment...' });
+  const r = await stageList({ kv, now: clock.now, fetcher: makeFetcher({ fetchFn: blocked }, clock), env: {} });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /blocked by Cloudflare \(HTTP 403, cf-mitigated: challenge\)/);
+  const interstitial = async () => ({ ok: true, status: 200, headers: new Headers(), text: async () => '<html><head><title>Just a moment...</title>' });
+  const f = makeFetcher({ fetchFn: interstitial }, clock);
+  assert.equal((await f.get('https://x/')).ok, false);
 });

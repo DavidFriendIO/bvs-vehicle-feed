@@ -1,0 +1,51 @@
+name: crawl
+
+on:
+  schedule:
+    - cron: '0 1 * * *' # UTC; finishes well before Merchant Center's 06:00 London fetch
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'probe = just test whether GitHub is blocked; crawl = full list + detail + build'
+        type: choice
+        options: [probe, crawl]
+        default: probe
+      max_detail:
+        description: 'Crawl only: max vehicle pages this run (20 s apart; the first fill needs about 75)'
+        default: '64'
+
+concurrency:
+  group: bvs-crawl
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'probe'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/probe.js
+
+  crawl:
+    if: github.event_name == 'schedule' || inputs.mode == 'crawl'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/crawl.js
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_KV_NAMESPACE_ID: ${{ secrets.CF_KV_NAMESPACE_ID }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          MAX_DETAIL: ${{ inputs.max_detail || '64' }}

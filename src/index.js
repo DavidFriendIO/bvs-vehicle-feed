@@ -1,10 +1,5 @@
-import { PoliteFetcher, fetchInit, describeError, stageList, stageDetail, stageBuild, stageBackfill, BACKFILL_MS, withLock, listAll } from './crawl.js';
+import { PoliteFetcher, fetchInit, describeError, stageList, stageDetail, stageBuild, stageBackfill, BACKFILL_MS, withLock, lockState, recordSkip, listAll } from './crawl.js';
 
-const CRON_STAGE = {
-  '5 0 * * *': 'list',
-  '*/10 1-3 * * *': 'detail',
-  '30 4 * * *': 'build',
-};
 const STAGES = { list: stageList, detail: stageDetail, build: stageBuild, backfill: stageBackfill };
 
 function safeEqual(a, b) {
@@ -17,10 +12,13 @@ function safeEqual(a, b) {
 export async function runStage(stage, env, deps = {}) {
   const kv = env.BVS_FEED;
   const now = deps.now || Date.now;
-  return withLock(kv, now, () => {
+  if (deps.force) await kv.delete('lock');
+  const r = await withLock(kv, now, () => {
     const fetcher = deps.fetcher || new PoliteFetcher({ now, sleep: deps.sleep });
     return STAGES[stage]({ kv, env, now, fetcher, alertFetch: deps.alertFetch, onProgress: deps.onProgress, maxMs: deps.maxMs });
-  }, stage === 'backfill' ? BACKFILL_MS + 3 * 60 * 1000 : undefined);
+  }, stage === 'backfill' ? BACKFILL_MS + 3 * 60 * 1000 : undefined, stage);
+  if (r.skipped) await recordSkip(kv, now, stage, r.skipped);
+  return r;
 }
 
 const json = (obj, status = 200) =>
@@ -60,6 +58,8 @@ async function status(kv) {
   const index = await get('index', null);
   const log = await get('log', []);
   return {
+    now: new Date().toISOString(),
+    lock: await lockState(kv, Date.now),
     lastRun: await get('lastRun', {}),
     indexCrawledAt: index?.crawledAt ?? null,
     idsInIndex: index?.ids?.length ?? 0,
@@ -96,6 +96,7 @@ export default {
     if ((request.method === 'GET' || request.method === 'POST') && parts.length === 2 && parts[0] === 'run' && safeEqual(parts[1], token)) {
       const stage = url.searchParams.get('stage');
       if (!STAGES[stage]) return json({ error: 'stage must be list, detail, build or backfill' }, 400);
+      const force = url.searchParams.get('force') === '1'; // clears a stale lock first
       if (stage === 'backfill') {
         // Stream progress: keep the tab open until it says "done". Closing it stops the run
         // (the queue is kept, so just open the URL again to carry on).
@@ -105,29 +106,25 @@ export default {
         const say = (m) => w.write(enc.encode(`${new Date().toISOString().slice(11, 19)} ${m}\n`)).catch(() => {});
         say('backfill started; keep this tab open (about 12 minutes max)');
         ctx.waitUntil(
-          runStage('backfill', env, { onProgress: say })
+          runStage('backfill', env, { onProgress: say, force })
             .then((r) => say(r.skipped ? `skipped: ${r.skipped}` : `result: ${JSON.stringify(r)}`))
             .catch((e) => say(`failed: ${e.message}`))
             .finally(() => w.close().catch(() => {})),
         );
         return new Response(readable, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
       }
-      const job = runStage(stage, env);
-      if (url.searchParams.get('wait') === '1') return json(await job);
+      // Waits for the result by default. Background (waitUntil) work is cut off ~30 s after the
+      // response, which kills a list crawl (6 pages x 20 s) half way and leaves its lock behind.
+      const job = runStage(stage, env, { force });
+      if (url.searchParams.get('async') !== '1') return json(await job);
       ctx.waitUntil(job.catch((e) => console.error('manual run failed', e)));
-      return json({ started: stage, note: 'Running in the background; check /status/{token}' }, 202);
+      return json({ started: stage, warning: 'async runs are cut off about 30 s after this response', note: 'check /status/{token}' }, 202);
     }
     return notFound();
   },
 
-  async scheduled(event, env, ctx) {
-    const stage = CRON_STAGE[event.cron];
-    if (!stage) { console.error('unknown cron', event.cron); return; }
-    ctx.waitUntil(
-      runStage(stage, env).then(
-        (r) => console.log(JSON.stringify({ stage, ...r })),
-        (e) => console.error(`stage ${stage} failed`, e),
-      ),
-    );
+  // Crawling now runs in GitHub Actions (the site blocks Worker requests), so there are no cron triggers.
+  async scheduled(event) {
+    console.log('scheduled event ignored: crawling runs in GitHub Actions', event.cron);
   },
 };
