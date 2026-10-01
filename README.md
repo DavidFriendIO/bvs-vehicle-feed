@@ -8,7 +8,7 @@ Cloudflare Worker that crawls braintreevansales.co.uk nightly (politely: one req
 | `*/10 1-3 * * *` | `detail`: fetch up to 3 queued vehicle pages |
 | `30 4 * * *` | `build`: write the XML to KV |
 
-Routes: `GET /feed/{token}.xml`, `GET /status/{token}`, `GET` or `POST /run/{token}?stage=list|detail|build|backfill`. Everything else is 404.
+Routes: `GET /feed/{token}.xml`, `GET /status/{token}`, `GET` or `POST /run/{token}?stage=list|detail|build|backfill`. `GET /debug/{token}?url=<encoded url>[&redirect=manual][&ua=none]` does one fetch with the crawler's headers and returns status, final URL, response headers and the first 2,000 characters of the body (or the full error). Everything else is 404.
 
 `list`, `detail` and `build` run in the background (add `&wait=1` to wait for the JSON result). `backfill` loops detail fetches (20 s apart) until the queue is empty or about 12 minutes pass, then builds, and streams progress to the page: keep the tab open until it says `done`. If you close it early, the run stops and the queue is kept; open the URL again to carry on.
 

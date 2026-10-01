@@ -1,4 +1,4 @@
-import { PoliteFetcher, stageList, stageDetail, stageBuild, stageBackfill, BACKFILL_MS, withLock, listAll } from './crawl.js';
+import { PoliteFetcher, fetchInit, describeError, stageList, stageDetail, stageBuild, stageBackfill, BACKFILL_MS, withLock, listAll } from './crawl.js';
 
 const CRON_STAGE = {
   '5 0 * * *': 'list',
@@ -26,6 +26,30 @@ export async function runStage(stage, env, deps = {}) {
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj, null, 2), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' } });
 const notFound = () => new Response('Not found', { status: 404 });
+
+/** One fetch with the crawler's exact headers; returns everything useful for diagnosis. */
+export async function debugFetch(target, { redirect = 'follow', ua = 'bvs', fetchFn } = {}) {
+  const doFetch = fetchFn || ((...a) => fetch(...a));
+  const init = fetchInit();
+  init.redirect = redirect;
+  if (ua === 'none') delete init.headers['User-Agent'];
+  const started = Date.now();
+  try {
+    const res = await doFetch(target, init);
+    const text = await res.text();
+    return {
+      ok: res.ok, requested: target, redirectMode: redirect, sentHeaders: init.headers,
+      status: res.status, statusText: res.statusText, finalUrl: res.url, redirected: res.redirected,
+      headers: Object.fromEntries(res.headers.entries()), bodyLength: text.length, body: text.slice(0, 2000),
+      ms: Date.now() - started,
+    };
+  } catch (e) {
+    return {
+      ok: false, requested: target, redirectMode: redirect, sentHeaders: init.headers, ms: Date.now() - started,
+      error: { summary: describeError(e), name: e?.name, message: e?.message, cause: e?.cause ? String(e.cause?.message ?? e.cause) : undefined, stack: e?.stack },
+    };
+  }
+}
 
 async function status(kv) {
   const get = async (k, d) => { const r = await kv.get(k); try { return r ? JSON.parse(r) : d; } catch { return d; } };
@@ -63,6 +87,11 @@ export default {
     }
     if (request.method === 'GET' && parts.length === 2 && parts[0] === 'status' && safeEqual(parts[1], token)) {
       return json(await status(env.BVS_FEED));
+    }
+    if (request.method === 'GET' && parts.length === 2 && parts[0] === 'debug' && safeEqual(parts[1], token)) {
+      const target = url.searchParams.get('url');
+      if (!target || !/^https?:\/\//i.test(target)) return json({ error: 'give ?url=<encoded http(s) url>; optional &redirect=manual|follow, &ua=none' }, 400);
+      return json(await debugFetch(target, { redirect: url.searchParams.get('redirect') === 'manual' ? 'manual' : 'follow', ua: url.searchParams.get('ua') || 'bvs' }));
     }
     if ((request.method === 'GET' || request.method === 'POST') && parts.length === 2 && parts[0] === 'run' && safeEqual(parts[1], token)) {
       const stage = url.searchParams.get('stage');

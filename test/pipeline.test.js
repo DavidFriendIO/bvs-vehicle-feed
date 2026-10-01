@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeKV, fakeClock, fakeSite, makeFetcher } from './helpers.js';
 import { stageList, stageDetail, stageBuild, stageBackfill } from '../src/crawl.js';
-import worker, { runStage } from '../src/index.js';
+import worker, { runStage, debugFetch } from '../src/index.js';
 
 async function fullRun({ kv = new FakeKV(), clock = fakeClock(), site } = {}) {
   site = site || fakeSite({ clock });
@@ -249,5 +249,63 @@ test('backfill over HTTP streams progress (GET)', async () => {
     await pending;
     assert.match(text, /backfill started/);
     assert.match(text, /done: 3 items/);
+  } finally { globalThis.fetch = orig; }
+});
+
+test('PoliteFetcher never calls fetch with itself as `this` (Workers: "Illegal invocation")', async () => {
+  const clock = fakeClock();
+  let thisSeen = 'unset';
+  const fetchFn = function () { thisSeen = this; return Promise.resolve({ ok: true, status: 200, text: async () => '' }); };
+  const f = makeFetcher({ fetchFn }, clock);
+  await f.get('https://x.example/');
+  assert.ok(thisSeen === undefined || thisSeen === globalThis, 'fetch was called as a method of another object');
+  // default (global fetch) path is also a plain call
+  const orig = globalThis.fetch;
+  let seen = 'unset';
+  globalThis.fetch = function () { seen = this; return Promise.resolve({ ok: true, status: 200, text: async () => '' }); };
+  try { await new (f.constructor)({ now: clock.now, sleep: clock.sleep }).get('https://x.example/'); } finally { globalThis.fetch = orig; }
+  assert.ok(seen === undefined || seen === globalThis);
+});
+
+test('a throwing fetch records name and message in lastRun.reason and alerts', async () => {
+  const clock = fakeClock();
+  const kv = new FakeKV();
+  const fetchFn = async () => { const e = new TypeError('Illegal invocation'); e.cause = new Error('socket closed'); throw e; };
+  const r = await stageList({ kv, now: clock.now, fetcher: makeFetcher({ fetchFn }, clock), env: {} });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /page 1: fetch threw TypeError: Illegal invocation \(cause: Error: socket closed\)/);
+  assert.match(r.alerts[0], /fetch threw TypeError: Illegal invocation/);
+  const last = JSON.parse(await kv.get('lastRun'));
+  assert.match(last.list.reason, /TypeError: Illegal invocation/);
+  const log = JSON.parse(await kv.get('log'));
+  assert.match(log[0].requests[0].error, /^TypeError: Illegal invocation/);
+});
+
+test('/debug returns status, final URL, headers, first 2000 chars; or the full error', async () => {
+  const env = { FEED_TOKEN: 'c'.repeat(32), BVS_FEED: new FakeKV() };
+  const ctx = { waitUntil() {} };
+  const orig = globalThis.fetch;
+  let init;
+  globalThis.fetch = async (u, i) => { init = i; const r = new Response('x'.repeat(5000), { status: 200, headers: { 'x-a': 'b' } }); Object.defineProperty(r, 'url', { value: u + 'final' }); return r; };
+  try {
+    const call = (q, tok = env.FEED_TOKEN) => worker.fetch(new Request(`https://w.example/debug/${tok}?${q}`), env, ctx);
+    const ok = await (await call('url=' + encodeURIComponent('https://www.braintreevansales.co.uk/used-vans'))).json();
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.length, 2000);
+    assert.equal(ok.bodyLength, 5000);
+    assert.equal(ok.headers['x-a'], 'b');
+    assert.equal(ok.finalUrl, 'https://www.braintreevansales.co.uk/used-vansfinal');
+    assert.match(init.headers['User-Agent'], /BVS-Feed/);
+    assert.equal(init.redirect, 'follow');
+    await call('url=' + encodeURIComponent('https://x.example/') + '&redirect=manual&ua=none');
+    assert.equal(init.redirect, 'manual');
+    assert.equal(init.headers['User-Agent'], undefined);
+    assert.equal((await call('url=ftp://x')).status, 400);
+    assert.equal((await call('url=https://x', 'wrong')).status, 404);
+    globalThis.fetch = async () => { throw new TypeError('boom', { cause: new Error('dns') }); };
+    const bad = await (await call('url=https://x.example/')).json();
+    assert.equal(bad.ok, false);
+    assert.equal(bad.error.name, 'TypeError');
+    assert.match(bad.error.summary, /TypeError: boom \(cause: dns|Error: dns\)/);
   } finally { globalThis.fetch = orig; }
 });

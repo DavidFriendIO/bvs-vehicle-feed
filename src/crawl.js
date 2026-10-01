@@ -18,8 +18,9 @@ export class StageAbort extends Error {}
  * request and the start of the next, every request recorded in `requests`.
  */
 export class PoliteFetcher {
-  constructor({ fetchFn = fetch, sleep, now = Date.now, gapMs = REQUEST_GAP_MS, requests = [] } = {}) {
-    this.fetchFn = fetchFn;
+  constructor({ fetchFn, sleep, now = Date.now, gapMs = REQUEST_GAP_MS, requests = [] } = {}) {
+    // Never store the bare global `fetch` and call it as a method: Workers throws "Illegal invocation".
+    this.fetchFn = fetchFn || ((...a) => fetch(...a));
     this.sleep = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.now = now;
     this.gapMs = gapMs;
@@ -37,14 +38,15 @@ export class PoliteFetcher {
       const entry = { t: new Date(this.now()).toISOString(), url };
       this.requests.push(entry);
       try {
-        const res = await this.fetchFn(url, { headers: { 'User-Agent': USER_AGENT, Accept: 'text/html' }, redirect: 'follow' });
+        const doFetch = this.fetchFn; // plain call, `this` is not the fetcher
+        const res = await doFetch(url, fetchInit());
         entry.status = res.status;
         const text = res.ok ? await res.text() : '';
         return { status: res.status, ok: res.ok, text };
       } catch (e) {
         entry.status = 0;
-        entry.error = String(e.message || e);
-        return { status: 0, ok: false, text: '' };
+        entry.error = describeError(e);
+        return { status: 0, ok: false, text: '', error: entry.error };
       } finally {
         this.lastEnd = this.now();
         entry.endedAt = new Date(this.lastEnd).toISOString();
@@ -55,6 +57,18 @@ export class PoliteFetcher {
     return p;
   }
 }
+
+export const fetchHeaders = () => ({ 'User-Agent': USER_AGENT, Accept: 'text/html' });
+export const fetchInit = () => ({ headers: fetchHeaders(), redirect: 'follow' });
+
+/** "TypeError: Illegal invocation (cause: ...)" */
+export function describeError(e) {
+  const name = e?.name || 'Error';
+  const msg = e?.message ?? String(e);
+  const cause = e?.cause ? ` (cause: ${e.cause.name ? e.cause.name + ': ' : ''}${e.cause.message ?? e.cause})` : '';
+  return `${name}: ${msg}${cause}`;
+}
+export const failure = (r) => (r.error ? `fetch threw ${r.error}` : `HTTP ${r.status}`);
 
 const throttled = (r) => r.status === 429 || r.status >= 500 || r.status === 0;
 
@@ -119,8 +133,8 @@ export async function stageList(deps) {
   for (let n = 1; n <= pages; n++) {
     const r = await fetcher.get(listUrl(n));
     if (!r.ok) {
-      alerts.push(`List page ${n} failed (HTTP ${r.status}). Index and feed left unchanged.`);
-      return finish({ ok: false, pagesFetched: n - 1, reason: `page ${n} HTTP ${r.status}` });
+      alerts.push(`List page ${n} (${listUrl(n)}) failed: ${failure(r)}. Index and feed left unchanged.`);
+      return finish({ ok: false, pagesFetched: n - 1, reason: `page ${n}: ${failure(r)}` });
     }
     if (n === 1) pages = parseTotalPages(r.text);
     const cards = parseListPage(r.text);
@@ -184,12 +198,12 @@ export async function stageDetail(deps) {
     s.attempted++;
     if (throttled(r)) {
       s.ok = false;
-      s.reason = `HTTP ${r.status} on ${id}; stopped, queue kept`;
+      s.reason = `${failure(r)} on ${id}; stopped, queue kept`;
       break;
     }
     let rec;
     if (!r.ok) {
-      rec = { id, url, status: 'error', reason: `HTTP ${r.status}` };
+      rec = { id, url, status: 'error', reason: failure(r) };
     } else {
       const p = parseVehiclePage(r.text, id);
       rec = p.status === 'error' ? { id, url, status: 'error', reason: p.reason } : { ...p.data, url, status: p.status, ...(p.reason ? { reason: p.reason } : {}) };
