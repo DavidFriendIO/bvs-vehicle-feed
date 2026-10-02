@@ -1,8 +1,8 @@
 name: crawl
 
+# Manual runs only. braintreevansales.co.uk blocks GitHub's data-centre IPs, so the daily crawl
+# runs on a home PC instead (run-crawl.bat, see WINDOWS-SETUP.md). Kept for testing.
 on:
-  schedule:
-    - cron: '0 1 * * *' # UTC; finishes well before Merchant Center's 06:00 London fetch
   workflow_dispatch:
     inputs:
       mode:
@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   probe:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'probe'
+    if: inputs.mode == 'probe'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -34,7 +34,7 @@ jobs:
       - run: node scripts/probe.js
 
   crawl:
-    if: github.event_name == 'schedule' || inputs.mode == 'crawl'
+    if: inputs.mode == 'crawl'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:

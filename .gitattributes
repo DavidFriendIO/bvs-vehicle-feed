@@ -1,0 +1,2 @@
+# Keep Windows line endings in the batch file (it is run on Windows from a ZIP download)
+*.bat -text
