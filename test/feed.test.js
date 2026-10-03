@@ -71,3 +71,20 @@ test('feed is well-formed XML (xmllint)', () => {
     fs.rmSync(new URL('../.test-feed.xml', import.meta.url), { force: true });
   }
 });
+
+import { qualityCounts } from '../src/feed.js';
+test('qualityCounts: no vehicle_option and fewer than 3 images', () => {
+  const recs = [
+    { id: '1', status: 'ok', features: ['a'], images: ['x', 'y', 'z'] },
+    { id: '2', status: 'ok', features: [], images: ['x', 'y', 'z'] },
+    { id: '3', status: 'ok', features: [' '], images: ['x'], featuresSource: 'description' },
+    { id: '4', status: 'excluded', features: [], images: [] },
+  ];
+  const q = qualityCounts(recs);
+  assert.equal(q.items, 3);
+  assert.equal(q.noVehicleOption, 2);
+  assert.deepEqual(q.noVehicleOptionIds, ['2', '3']);
+  assert.equal(q.fewerThan3Images, 1);
+  assert.deepEqual(q.fewerThan3ImagesIds, ['3']);
+  assert.equal(q.optionsFromDescription, 1);
+});

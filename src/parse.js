@@ -64,6 +64,54 @@ export function parseTotalPages(html) {
   return Math.min(Math.max(n, 1), MAX_LIST_PAGES);
 }
 
+// ----------------------------------------------------------------- features
+
+const NOT_FEATURES = /\b(px|part[- ]?ex(change)?|finance|deposit|delivery|please call|call us|warranty|plus many more|we take|nationwide|no deposit|best prices?)\b/i;
+
+/** Items of the page's own Key Features list (the accordion in #detail-key-features-modal). */
+export function keyFeatures(html) {
+  const blk = section(html, '<div id="detail-key-features-modal"', '<div id="detail-');
+  const out = [];
+  for (const m of blk.matchAll(/list-stat">([\s\S]*?)<\/div>/g)) out.push(clean(m[1]));
+  return out;
+}
+
+/**
+ * Equipment list written into the description when Key Features is empty. In order of preference:
+ * <li> items, bullet lines ("• x", "- x"), then the paragraph that is a run of short comma-separated items.
+ */
+export function descriptionFeatures(descHtml) {
+  const lis = [...descHtml.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)].map((m) => clean(m[1])).filter(Boolean);
+  if (lis.length >= 3) return lis;
+
+  const asText = (h) => decode(h.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ' '));
+  const bullets = asText(descHtml).split(/\r?\n/).map((l) => /^\s*(?:[•·▪●*]|[-–]\s)\s*(.+)$/.exec(l)?.[1]?.trim()).filter(Boolean);
+  if (bullets.length >= 3) return bullets;
+
+  let best = [];
+  for (const m of descHtml.matchAll(/<p>([\s\S]*?)<\/p>/gi)) {
+    const parts = asText(m[1]).split(/[,;\n]/).map((x) => x.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    if (parts.length < 5) continue;
+    const kept = parts.filter((x) => x.length >= 2 && x.length <= 60 && !/[.!?]\s/.test(x) && !NOT_FEATURES.test(x));
+    if (kept.length >= 5 && kept.length / parts.length >= 0.6 && kept.length > best.length) best = kept;
+  }
+  return best;
+}
+
+/** { features, source } with commas removed, de-duplicated, capped. */
+export function parseFeatures(html, descHtml = section(html, '<div id="detail-description-modal"', '<div id="detail-')) {
+  let source = 'key_features';
+  let raw = keyFeatures(html);
+  if (!raw.length) { raw = descriptionFeatures(descHtml.replace(/<h2>[\s\S]*?<\/h2>/, '')); source = 'description'; }
+  const features = [];
+  for (const f of raw) {
+    const t = f.replace(/,/g, '').trim();
+    if (t && !features.includes(t)) features.push(t);
+    if (features.length >= MAX_FEATURES) break;
+  }
+  return { features, source: features.length ? source : null };
+}
+
 // ------------------------------------------------------------- vehicle page
 
 const titleCase = (s) => s.toLowerCase().replace(/(^|[\s-])([a-z])/g, (_, a, b) => a + b.toUpperCase());
@@ -135,13 +183,7 @@ export function parseVehiclePage(html, id) {
     const descHtml = section(html, '<div id="detail-description-modal"', '<div id="detail-');
     const description = clean(descHtml.replace(/<h2>[\s\S]*?<\/h2>/, ''));
 
-    const featHtml = section(html, '<div id="detail-key-features-modal"', '<div id="detail-');
-    const features = [];
-    for (const m of featHtml.matchAll(/list-stat">([\s\S]*?)<\/div>/g)) {
-      const f = clean(m[1]).replace(/,/g, '');
-      if (f && !features.includes(f)) features.push(f);
-      if (features.length >= MAX_FEATURES) break;
-    }
+    const { features, source: featuresSource } = parseFeatures(html, descHtml);
 
     const pm = /£\s*([\d,]+(?:\.\d+)?)/.exec(priceText);
     const price = pm ? Number(pm[1].replace(/,/g, '')) : null;
@@ -153,7 +195,7 @@ export function parseVehiclePage(html, id) {
       id: String(id), make, model, variant, year, price, vat, priceText, mileage,
       colour: spec.colour || cd?.colour || '', fuel: spec['fuel type'] || '',
       transmission: spec.transmission || '', bodyType: spec['body style'] || '',
-      images, features,
+      images, features, featuresSource,
     };
 
     if (price == null) return { status: 'excluded', reason: `no numeric price: ${priceText || 'blank'}`, data };

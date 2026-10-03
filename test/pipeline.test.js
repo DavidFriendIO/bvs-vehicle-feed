@@ -353,3 +353,19 @@ test('Cloudflare challenge is detected and stops the detail stage; list reports 
   const f = makeFetcher({ fetchFn: interstitial }, clock);
   assert.equal((await f.get('https://x/')).ok, false);
 });
+
+test('build summary and /status carry the quality counts', async () => {
+  const { kv, build } = await fullRun();
+  assert.equal(typeof build.noVehicleOption, 'number');
+  assert.equal(typeof build.fewerThan3Images, 'number');
+  assert.equal(build.noVehicleOptionIds.length <= 20, true);
+  const rec = JSON.parse(await kv.get('v:8270075'));
+  rec.features = []; rec.images = rec.images.slice(0, 2);
+  await kv.put('v:8270075', JSON.stringify(rec));
+  const env = { FEED_TOKEN: 'e'.repeat(32), BVS_FEED: kv };
+  const st = await (await worker.fetch(new Request(`https://w.example/status/${env.FEED_TOKEN}`), env, { waitUntil() {} })).json();
+  assert.equal(st.quality.noVehicleOption >= 1, true);
+  assert.ok(st.quality.noVehicleOptionIds.includes('8270075'));
+  assert.ok(st.quality.fewerThan3ImagesIds.includes('8270075'));
+  assert.equal(st.lastRun.build.noVehicleOption, build.noVehicleOption);
+});

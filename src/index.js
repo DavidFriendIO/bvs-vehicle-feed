@@ -1,3 +1,4 @@
+import { qualityCounts } from './feed.js';
 import { PoliteFetcher, fetchInit, describeError, stageList, stageDetail, stageBuild, stageBackfill, BACKFILL_MS, withLock, lockState, recordSkip, listAll } from './crawl.js';
 
 const STAGES = { list: stageList, detail: stageDetail, build: stageBuild, backfill: stageBackfill };
@@ -63,6 +64,7 @@ async function status(kv) {
     lastRun: await get('lastRun', {}),
     indexCrawledAt: index?.crawledAt ?? null,
     idsInIndex: index?.ids?.length ?? 0,
+    quality: (({ items, ...q }) => q)(qualityCounts(records)), // over stored records; lastRun.build has the counts at build time
     itemsInFeed: feed ? (feed.match(/<item>/g) || []).length : 0,
     queueLength: queue.length,
     excluded: records.filter((r) => r.status === 'excluded').map((r) => ({ id: r.id, reason: r.reason })),

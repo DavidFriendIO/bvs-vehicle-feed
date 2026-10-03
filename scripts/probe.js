@@ -43,7 +43,7 @@ try {
   const p = r2.ok ? parseVehiclePage(html2, /(\d+)$/.exec(target)[1]) : { status: 'error', reason: 'page not loaded' };
   if (p.data) {
     const d = p.data;
-    say(`vehicle data found: YES | ${d.year} ${d.make} ${d.model} | price ${d.priceText} | ${d.mileage} miles | ${d.images.length} images | ${d.features.length} features | status ${p.status}${p.reason ? ' (' + p.reason + ')' : ''}`);
+    say(`vehicle data found: YES | ${d.year} ${d.make} ${d.model} | price ${d.priceText} | ${d.mileage} miles | ${d.images.length} images | ${d.features.length} features (${d.featuresSource || "none found"}) | status ${p.status}${p.reason ? ' (' + p.reason + ')' : ''}`);
   } else say(`vehicle data found: NO (${p.reason})`);
   vehicleOk = Boolean(p.data);
 } finally {

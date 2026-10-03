@@ -2,7 +2,7 @@ import {
   USER_AGENT, REQUEST_GAP_MS, DETAIL_BATCH, STALE_MS, SAFETY_RATIO, listUrl, DEFAULT_LIST_PAGES, ALERT_TO,
 } from './config.js';
 import { parseListPage, parseTotalPages, parseVehiclePage } from './parse.js';
-import { buildFeed } from './feed.js';
+import { buildFeed, qualityCounts } from './feed.js';
 
 const jget = async (kv, key, fallback = null) => {
   const raw = await kv.get(key);
@@ -265,6 +265,11 @@ export async function listAll(kv, prefix) {
   return keys;
 }
 
+const qualityCountsNoIds = (ok) => {
+  const { items, ...q } = qualityCounts(ok);
+  return q;
+};
+
 export async function stageBuild(deps) {
   const { kv, now = Date.now } = deps;
   const records = [];
@@ -282,7 +287,7 @@ export async function stageBuild(deps) {
     summary = { ok: false, items: ok.length, previousItems: prevCount, reason: 'safety rule: <60% of previous feed' };
   } else {
     await kv.put('feed', buildFeed(ok));
-    summary = { ok: true, items: ok.length, excluded: records.filter((r) => r.status === 'excluded').length, errors: records.filter((r) => r.status === 'error').length };
+    summary = { ok: true, items: ok.length, ...qualityCountsNoIds(ok), excluded: records.filter((r) => r.status === 'excluded').length, errors: records.filter((r) => r.status === 'error').length };
   }
   await recordRun(kv, now(), 'build', summary, [], alerts);
   if (alerts.length) await sendAlert(deps.env || {}, deps.alertFetch || fetch, 'BVS feed: build alert', alerts.join('\n'));

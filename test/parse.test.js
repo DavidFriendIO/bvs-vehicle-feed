@@ -73,3 +73,49 @@ test('VAT: "no vat" only in the heading/derivative line is detected; similar-veh
   assert.equal(parseVehiclePage(plus, '7027496').data.vat, 'plus');
   assert.equal(parseVehiclePage(raw('7027496'), '7027496').data.vat, 'shown');
 });
+
+// ---------------------------------------------------------------- features
+import fs from 'node:fs';
+import { parseFeatures, descriptionFeatures } from '../src/parse.js';
+const fixtureExists = (id) => fs.existsSync(new URL(`../fixtures/raw/${id}.html`, import.meta.url));
+
+test('features: Key Features list is preferred when present', () => {
+  const r = p('8270075').data;
+  assert.equal(r.featuresSource, 'key_features');
+  assert.equal(r.features[0], '17in Alloy Wheels - 20-Spoke Design');
+});
+
+test('features: 8116122 Dethleffs (Key Features empty on the page) falls back to the description equipment list', () => {
+  const html = raw('8116122');
+  assert.match(html, /<summary>Exterior<\/summary>\s*<div class="stats-ul">No features available\./);
+  const r = p('8116122').data;
+  assert.equal(r.featuresSource, 'description');
+  assert.ok(r.features.length >= 10 && r.features.length <= 15, String(r.features.length));
+  for (const want of ['AIRCON', 'pioneer stereo', 'sat-nav', 'bluetooth', 'fitted tracker', 'solar panel']) assert.ok(r.features.includes(want), want);
+  // prose, sales chatter and the boilerplate paragraph must not leak in
+  assert.ok(!r.features.some((f) => /px change|finance|deposit|plus many more|UK.s fastest|\bfrom its 1 owner\b/i.test(f)), r.features.join(' | '));
+  assert.ok(r.features.every((f) => !f.includes(',') && f.length <= 60));
+});
+
+// Drop fixtures/8102623.html (Swift Bolero, saved from Chrome view-source, then npm run unwrap-fixtures) to enable this.
+test('features: 8102623 Swift Bolero has vehicle options', { skip: !fixtureExists('8102623') && 'fixtures/raw/8102623.html not in the repo yet' }, () => {
+  const r = p('8102623');
+  assert.equal(r.status, 'ok');
+  assert.ok(r.data.features.length > 0, 'no features parsed');
+});
+
+test('features: Key Features block removed entirely -> description list is used', () => {
+  const html = raw('8270075').replace(/<div id="detail-key-features-modal"[\s\S]*?(?=<div id="detail-)/, '');
+  assert.ok(!html.includes('detail-key-features-modal'));
+  const r = parseVehiclePage(html, '8270075').data;
+  assert.equal(r.featuresSource, 'description');
+  assert.equal(r.features[0], '17in Alloy Wheels - 20-Spoke Design');
+  assert.equal(r.features.length, 15);
+});
+
+test('features: <li> items and bullet lines in a description', () => {
+  assert.deepEqual(descriptionFeatures('<p>Intro</p><ul><li>Sat nav</li><li>Heated seats</li><li>Tow bar</li></ul>'), ['Sat nav', 'Heated seats', 'Tow bar']);
+  assert.deepEqual(descriptionFeatures('<p>Spec:<br>• Sat nav<br>• Heated seats<br>- Tow bar<br>Call us</p>'), ['Sat nav', 'Heated seats', 'Tow bar']);
+  assert.deepEqual(descriptionFeatures('<p>A lovely van. Great value for money, call today.</p>'), []);
+  assert.deepEqual(parseFeatures('<html></html>', '<p>nothing</p>'), { features: [], source: null });
+});

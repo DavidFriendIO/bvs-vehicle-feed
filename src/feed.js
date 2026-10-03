@@ -99,3 +99,18 @@ ${items.join('\n')}
 </rss>
 `;
 }
+
+/** Parser-regression signals over stored detail records (only those that would be in the feed). */
+export function qualityCounts(records, sample = 20) {
+  const ok = records.filter((r) => r && r.status === 'ok');
+  const noOpt = ok.filter((r) => !(r.features || []).some((f) => tidy(f)));
+  const fewImg = ok.filter((r) => (r.images || []).length < 3);
+  return {
+    items: ok.length,
+    noVehicleOption: noOpt.length,
+    fewerThan3Images: fewImg.length,
+    noVehicleOptionIds: noOpt.slice(0, sample).map((r) => r.id),
+    fewerThan3ImagesIds: fewImg.slice(0, sample).map((r) => r.id),
+    optionsFromDescription: ok.filter((r) => r.featuresSource === 'description').length,
+  };
+}
