@@ -1,7 +1,7 @@
 name: crawl
 
 # Manual runs only. braintreevansales.co.uk blocks GitHub's data-centre IPs, so the daily crawl
-# runs on a home PC instead (run-crawl.bat, see WINDOWS-SETUP.md). Kept for testing.
+# runs on a home PC in Chrome instead (run-crawl.bat, see WINDOWS-SETUP.md). Kept for testing.
 on:
   workflow_dispatch:
     inputs:
@@ -31,7 +31,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node scripts/probe.js
+      - run: npm install --omit=dev --no-audit --no-fund
+      - run: xvfb-run -a node scripts/probe.js
 
   crawl:
     if: inputs.mode == 'crawl'
@@ -42,7 +43,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node scripts/crawl.js
+      - run: npm install --omit=dev --no-audit --no-fund
+      - run: xvfb-run -a node scripts/crawl.js
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

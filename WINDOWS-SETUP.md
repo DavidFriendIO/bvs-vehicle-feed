@@ -1,13 +1,14 @@
 # Running the feed crawl on your Windows PC
 
-braintreevansales.co.uk blocks cloud servers, so the nightly crawl runs on your own PC, where it works. It reads the stock, then updates the feed that Google Merchant Center collects. Set-up takes about 20 minutes, once.
+braintreevansales.co.uk blocks anything that isn't a real web browser, so the nightly crawl runs on your own PC and opens pages in your installed **Google Chrome**, the same way you would. It reads the stock, then updates the feed that Google Merchant Center collects. Set-up takes about 20 minutes, once.
 
-The PC needs to be switched on, awake and online at the scheduled time (step 8 catches up if it was off).
+The PC needs to be switched on, awake, online and **signed in to Windows** at the scheduled time (step 7 catches up if it was off). A Chrome window sits minimised in the taskbar while the crawl runs. Leave it alone.
 
-## 1. Install Node.js
+## 1. Install Node.js (and check you have Chrome)
 1. Go to <https://nodejs.org> and click the green **LTS** download button.
 2. Open the downloaded file and click Next through the installer, leaving every option as it is. Click Finish.
 3. Check it worked: press the Windows key, type `cmd`, press Enter, type `node -v` and press Enter. You should see a number starting with `v22` or higher. Close the window.
+4. Google Chrome must be installed in the normal way (<https://www.google.com/chrome>). Nothing else is downloaded for it.
 
 ## 2. Download the project
 1. Sign in to GitHub in your browser and open <https://github.com/DavidFriendIO/bvs-vehicle-feed>.
@@ -49,18 +50,28 @@ Open <https://dash.cloudflare.com> and sign in. Menu names change now and then; 
 3. Click **File > Save As**. In **File name** type exactly `".env"` (including the quote marks). In **Save as type** choose **All files**. Save it in the same folder, `C:\bvs-vehicle-feed`.
 4. Don't share the `.env` file with anyone. It contains the token.
 
-## 5. First run
-1. Double-click **run-crawl.bat**. A black window opens and shows its progress.
-2. The first run takes about 30 minutes because it politely waits 20 seconds between pages. Leave the window open and the PC awake.
+## 5. Test that Chrome gets through
+1. Press the Windows key, type `cmd` and press Enter. In the black window type these two lines, pressing Enter after each:
+   ```
+   cd C:\bvs-vehicle-feed
+   run-crawl.bat probe
+   ```
+2. The very first time, it spends about a minute installing a small component (needs internet). Then a Chrome window opens on screen and loads the stock list and one vehicle, 20 seconds apart.
+3. If Chrome shows a "Verify you are human" box, tick it. This is only needed occasionally. The crawl remembers it afterwards in the `chrome-profile` folder.
+4. At the end you should see **vehicle data found: YES** and **PROBE OK**. If you see **PROBE FAILED**, send David the text in the window.
+
+## 6. First full run
+1. Double-click **run-crawl.bat**. A black window shows progress, and a Chrome window appears minimised in the taskbar.
+2. The first run takes about 30 minutes because it politely waits 20 seconds between pages. Leave both windows open and the PC awake.
 3. At the end it says **DONE: the feed was updated.** Press any key to close. If it says **PROBLEM**, open the newest file in `C:\bvs-vehicle-feed\logs` and send it to David.
 4. Check the feed: open `https://bvs-vehicle-feed.<your-subdomain>.workers.dev/status/<your token>` in your browser. `itemsInFeed` should be about 65 to 70. (David has your Worker address and token.)
 
-If the window says **"blocked by Cloudflare"**, the website is blocking this PC's connection too. Send David the log.
+If a run keeps failing with "blocked by Cloudflare", run it with Chrome visible so you can see what the site is showing: `run-crawl.bat show`.
 
-## 6. Make it run every day (Task Scheduler)
+## 7. Make it run every day (Task Scheduler)
 1. Press the Windows key, type `Task Scheduler` and open it.
 2. In the right-hand panel click **Create Task** (not "Create Basic Task").
-3. **General** tab: Name `BVS vehicle feed crawl`. Choose **Run only when user is logged on**.
+3. **General** tab: Name `BVS vehicle feed crawl`. Choose **Run only when user is logged on**. (It has to be this one: Chrome needs your desktop to open in.)
 4. **Triggers** tab: **New**, set **Daily**, start time **09:00:00**, click OK.
 5. **Actions** tab: **New**, Action **Start a program**, then fill in:
    - Program/script: `C:\bvs-vehicle-feed\run-crawl.bat`
@@ -82,3 +93,6 @@ Google collects the feed at 06:00 each morning, so a 09:00 crawl is picked up th
 - Each day's output is saved in `C:\bvs-vehicle-feed\logs\crawl-YYYY-MM-DD.log`. Delete old ones whenever you like.
 - To update the software later: download a new ZIP (step 2) and copy its files over the old folder. Your `.env` and `logs` stay as they are.
 - To stop the daily crawl: in Task Scheduler right-click the task and choose **Disable**.
+- The crawl uses its own separate Chrome profile (`chrome-profile` folder), so your everyday Chrome, bookmarks and passwords aren't touched, and you can use Chrome as normal while it runs. Don't delete `chrome-profile` unless asked: it holds the site's "you're a real browser" cookie.
+- **"Google Chrome was not found"**: install Chrome, or put its location in `.env` as `CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe`.
+- **"already open (another crawl running?)"**: a previous crawl's Chrome is still running. Close it from the taskbar or restart the PC, then try again.
